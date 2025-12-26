@@ -3,6 +3,7 @@ God of Dice
 Бот для поддержки настольной ролевой игры Savage Worlds (в основном Adventure Edition) в Discord.
 Основные возможности
 
+[God of Dice](https://discord.com/oauth2/authorize?client_id=1422683057567301714&permissions=84992&integration_type=0&scope=bot)
 
 Быстрые проверки навыков и характеристик
 
@@ -59,7 +60,7 @@ text.
 
 ├── bot.py               # точка входа
 
-├── config.py            # токен и префикс (git ignore!)
+├── config.py            # токен и префикс
 
 ├── cogs/
 │   ├── basic.py         # навыки, урон
