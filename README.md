@@ -5,6 +5,8 @@ God of Dice
 
 [God of Dice](https://discord.com/oauth2/authorize?client_id=1422683057567301714&permissions=84992&integration_type=0&scope=bot)
 
+Мой [Бусти] (https://boosty.to/blessed_by_dice_god) для желающий потдержать проект
+ 
 Быстрые проверки навыков и характеристик
 
 !s8!s10+2!e12-1!d6
