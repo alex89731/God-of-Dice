@@ -1,4 +1,4 @@
-Savage Worlds Discord Bot
+God of Dice
 
 Бот для поддержки настольной ролевой игры Savage Worlds (в основном Adventure Edition) в Discord.
 Основные возможности
