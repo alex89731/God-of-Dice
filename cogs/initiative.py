@@ -3,7 +3,8 @@ import discord
 import random
 import re
 
-class Initiative(commands.Cog):
+
+class InitiativeState:
     SUITS = ('♣', '♦', '♥', '♠')
     RANKS = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
     JOKER = 'Joker'
@@ -11,23 +12,20 @@ class Initiative(commands.Cog):
     TRAIT_NAMES = {
         'q': 'стремительность',
         'l': 'хладнокровие',
-        'i': 'хладнокровие+',  # i и l отображаются одинаково
+        'i': 'хладнокровие+',
         'h': 'медлительность'
     }
 
-    def __init__(self, bot):
-        self.bot = bot
+    def __init__(self):
         self.deck = []
         self.discard = []
-        self.current_round = {}  # name → {'card': best, 'all_cards': [...], 'traits': {...}}
+        self.current_round = {}
         self.on_hold = set()
         self.joker_this_round = False
         self.round_number = 0
 
     def full_deck(self):
-        deck = [f"{rank}{suit}" for suit in self.SUITS for rank in self.RANKS]
-        deck += [self.JOKER] * 2
-        return deck
+        return [f"{r}{s}" for s in self.SUITS for r in self.RANKS] + [self.JOKER] * 2
 
     def shuffle_deck(self):
         full = self.deck + self.discard
@@ -49,93 +47,114 @@ class Initiative(commands.Cog):
 
     def card_value(self, card):
         if card == self.JOKER:
-            return (100, 100)  # Джокер всегда старше всего
+            return (100, 100)
         rank = card[:-1]
-        rank_idx = self.RANKS.index(rank)
-        suit_idx = self.SUITS.index(card[-1])
-        return (rank_idx, suit_idx)
+        return (self.RANKS.index(rank), self.SUITS.index(card[-1]))
 
-    def format_card(self, card):
-        if card == self.JOKER:
-            return "**Joker**"
-        return card
+    @staticmethod
+    def format_card(card):
+        return "**Joker**" if card == InitiativeState.JOKER else card
 
-    def format_all_cards(self, cards):
+    @staticmethod
+    def format_all_cards(cards):
         if not cards:
             return ""
-        return "[" + ", ".join(self.format_card(c) for c in cards) + "]"
+        return "[" + ", ".join(InitiativeState.format_card(c) for c in cards) + "]"
 
     def get_trait_display(self, traits):
         active = []
-        if traits.get('q'):
-            active.append(self.TRAIT_NAMES['q'])
-        if traits.get('i') or traits.get('l'):
-            active.append(self.TRAIT_NAMES['i'])
-        if traits.get('h'):
-            active.append(self.TRAIT_NAMES['h'])
+        if traits.get('q'): active.append(self.TRAIT_NAMES['q'])
+        if traits.get('i') or traits.get('l'): active.append(self.TRAIT_NAMES['i'])
+        if traits.get('h'): active.append(self.TRAIT_NAMES['h'])
         return ", ".join(active) if active else ""
 
-    def parse_name_and_traits(self, token):
-        """Парсит токен вида 'Имя-q-l-h' или 'Имя' и возвращает (name, traits_dict)"""
+    @staticmethod
+    def parse_name_and_traits(token):
         name = token
         traits = {'q': False, 'l': False, 'i': False, 'h': False}
 
         while True:
             changed = False
-            for flag, key in [('-q', 'q'), ('-l', 'l'), ('-i', 'i'), ('-h', 'h')]:
+            for flag, key in [('-q','q'), ('-l','l'), ('-i','i'), ('-h','h')]:
                 if name.endswith(flag):
                     traits[key] = True
                     name = name[:-len(flag)]
                     changed = True
             if not changed:
                 break
-
         return name.strip(), traits
 
-    def deal_to_character(self, name, traits):
+
+class Initiative(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.states = {}
+
+    def get_state(self, ctx):
+        gid = ctx.guild.id if ctx.guild else 0
+        if gid not in self.states:
+            self.states[gid] = InitiativeState()
+        return self.states[gid]
+
+    async def _show_initiative(self, ctx, state):
+        if not state.current_round:
+            await ctx.send("Инициатива пуста. Используйте !f и !di")
+            return
+
+        sorted_chars = sorted(
+            state.current_round.items(),
+            key=lambda x: state.card_value(x[1]['card']),
+            reverse=True
+        )
+
+        header = f"Раунд {state.round_number}  |  Осталось карт: {len(state.deck)}"
+        lines = [header, "-" * len(header)]
+        lines.append(f"{'Имя':<20} {'Черты':<28} {'Карта':<12} Все карты")
+
+        for name, data in sorted_chars:
+            hold = " (на холде)" if name in state.on_hold else ""
+            traits_d = state.get_trait_display(data['traits'])
+            card_s = state.format_card(data['card'])
+            all_s = state.format_all_cards(data['all_cards'])
+            lines.append(f"{name:<20} {traits_d:<28} {card_s:<12} {all_s}{hold}")
+
+        await ctx.send("```\n" + "\n".join(lines) + "\n```")
+
+    def _deal_to_character(self, state, name, traits):
         all_cards = []
 
-        # Базовое количество карт
-        if traits.get('i'):
-            num_draws = 3
-        elif traits.get('l'):
-            num_draws = 2
-        else:
-            num_draws = 1
-
+        num_draws = 3 if traits.get('i') else 2 if traits.get('l') else 1
         for _ in range(num_draws):
-            all_cards.append(self.draw_card())
+            all_cards.append(state.draw_card())
 
-        # Медлительность: если h — берём худшую из двух
+        best_card = all_cards[0] if all_cards else state.JOKER
+
         if traits.get('h'):
-            # Медлительность: всегда тянем две карты
             if len(all_cards) < 2:
-                all_cards.append(self.draw_card())
+                all_cards.append(state.draw_card())
 
-            # Отделяем джокеры
-            joker_cards = [c for c in all_cards if c == self.JOKER]
-            non_joker_cards = [c for c in all_cards if c != self.JOKER]
+            jokers = [c for c in all_cards if c == state.JOKER]
+            non_jokers = [c for c in all_cards if c != state.JOKER]
 
-            if joker_cards:
-                # Джокер всегда остаётся, даже если есть две обычные карты
-                best_card = self.JOKER
+            if jokers:
+                best_card = state.JOKER
+            elif non_jokers:
+                best_card = min(non_jokers, key=state.card_value)
             else:
-                # Нет джокера → берём худшую из обычных
-                best_card = min(non_joker_cards, key=self.card_value) if non_joker_cards else self.JOKER
+                best_card = state.JOKER
 
-        # Стремительность: если лучшая карта имеет ранг ≤5 (2-5), тянем дальше
-        if traits.get('q') and best_card != self.JOKER:
-            current_value = self.card_value(best_card)[0]
-            while current_value <= 3:  # индексы 0-3 = 2,3,4,5
-                extra = self.draw_card()
+        if traits.get('q') and best_card != state.JOKER:
+            curr = state.card_value(best_card)[0]
+            while curr <= 3:
+                extra = state.draw_card()
                 all_cards.append(extra)
-                if self.card_value(extra) > self.card_value(best_card):
+                if state.card_value(extra) > state.card_value(best_card):
                     best_card = extra
-                if extra == self.JOKER:
+                if extra == state.JOKER:
                     break
-                current_value = self.card_value(extra)[0]
+                curr = state.card_value(extra)[0]
 
-        self.current_round[name] = {
+        state.current_round[name] = {
             'card': best_card,
             'all_cards': all_cards,
             'traits': traits.copy()
@@ -143,18 +162,20 @@ class Initiative(commands.Cog):
 
     @commands.command(name='f', aliases=['fight'])
     async def start_fight(self, ctx):
-        self.deck = self.full_deck()
-        random.shuffle(self.deck)
-        self.discard = []
-        self.current_round = {}
-        self.on_hold = set()
-        self.joker_this_round = False
-        self.round_number = 1
-        remaining = len(self.deck)
-        await ctx.send(f"🃏 Бой начат! Новая колода (54 карты), в колоде: **{remaining}** карт. Раунд 1.")
+        state = self.get_state(ctx)
+        state.deck = state.full_deck()
+        random.shuffle(state.deck)
+        state.discard = []
+        state.current_round = {}
+        state.on_hold = set()
+        state.joker_this_round = False
+        state.round_number = 1
+        await ctx.send(f"Бой начат. Новая колода (54 карты). Раунд 1.")
 
     @commands.command(name='di', aliases=['deal'])
     async def deal_cards(self, ctx, *, names: str):
+        state = self.get_state(ctx)
+
         if not names.strip():
             await ctx.send("Укажите хотя бы одно имя.")
             return
@@ -163,154 +184,132 @@ class Initiative(commands.Cog):
         dealt = []
 
         for token in tokens:
-            name, traits = self.parse_name_and_traits(token)
-            if not name:
-                continue
+            name, traits = InitiativeState.parse_name_and_traits(token)
+            if not name: continue
 
-            # Удаляем старые данные
-            self.current_round.pop(name, None)
-            self.on_hold.discard(name)
+            state.current_round.pop(name, None)
+            state.on_hold.discard(name)
 
-            self.deal_to_character(name, traits)
+            self._deal_to_character(state, name, traits)
 
-            trait_display = self.get_trait_display(traits)
-            best_card = self.current_round[name]['card']
-            dealt.append(f"{name} [{trait_display}]: {self.format_card(best_card)}")
+            td = state.get_trait_display(traits)
+            bc = state.current_round[name]['card']
+            dealt.append(f"{name} [{td}]: {state.format_card(bc)}")
 
-        remaining = len(self.deck)
-        await ctx.send("Карты розданы:\n" + "\n".join(dealt) + f"\n\nОсталось в колоде: **{remaining}** карт")
+        await ctx.send(
+            "Карты розданы:\n" + "\n".join(dealt) +
+            f"\n\nОсталось в колоде: **{len(state.deck)}** карт"
+        )
 
-        await self.show_initiative(ctx)
+        await self._show_initiative(ctx, state)
 
     @commands.command(name='init', aliases=['initiative'])
     async def show_initiative(self, ctx):
-        if not self.current_round:
-            await ctx.send("Инициатива пуста. Используйте `!f` и `!di`.")
-            return
-
-        sorted_chars = sorted(
-            self.current_round.items(),
-            key=lambda x: self.card_value(x[1]['card']),
-            reverse=True
-        )
-
-        remaining = len(self.deck)
-        header = f" ========== Раунд {self.round_number} | В колоде: {remaining} карт ========== "
-        lines = [header]
-        lines.append(f"{'Имя':<20} {'Черты':<28} {'Карта':<12} Все карты")
-
-        for name, data in sorted_chars:
-            hold = " (на холде)" if name in self.on_hold else ""
-            traits_display = self.get_trait_display(data['traits'])
-            card_str = self.format_card(data['card'])
-            all_str = self.format_all_cards(data['all_cards'])
-            line = f"{name:<20} {traits_display:<28} {card_str:<12} {all_str}{hold}"
-            lines.append(line)
-
-        await ctx.send("```\n" + "\n".join(lines) + "\n```")
+        state = self.get_state(ctx)
+        await self._show_initiative(ctx, state)
 
     @commands.command(name='rd', aliases=['round'])
     async def new_round(self, ctx, arg: str = ""):
-        self.round_number += 1
+        state = self.get_state(ctx)
+        state.round_number += 1
 
-        keep = '+' in arg.strip()  # игнорируем лишние пробелы
-        removes = re.findall(r'-\w+', arg)
-        remove_names = {r[1:] for r in removes}
+        keep = '+' in arg.strip()
+        removes = {r[1:] for r in re.findall(r'-\w+', arg)}
 
-        characters_to_keep = []
+        to_keep = []
 
         if keep:
-            # Сохраняем всех, кроме явно удалённых через -Имя
-            for name, data in self.current_round.items():
-                if name not in remove_names:
-                    characters_to_keep.append((name, data['traits']))
+            for name, data in state.current_round.items():
+                if name not in removes:
+                    to_keep.append((name, data['traits']))
                 else:
-                    # Опционально: снимаем с холда удаляемых
-                    self.on_hold.discard(name)
-        else:
-            # Без + — никого не сохраняем
-            pass
+                    state.on_hold.discard(name)
 
-        # Очищаем текущий раунд и холд
-        self.current_round.clear()
-        self.on_hold.clear()
+        state.current_round.clear()
+        state.on_hold.clear()
 
-        # Пересдаём колоду, если был джокер или мало карт
-        if self.joker_this_round or len(self.deck) < 10:
-            self.shuffle_deck()
+        if state.joker_this_round or len(state.deck) < 10:
+            state.shuffle_deck()
 
-        self.joker_this_round = False
+        state.joker_this_round = False
 
-        msg = f"🕐 Новый раунд {self.round_number}!"
+        msg = f"Новый раунд {state.round_number}"
         if keep:
-            msg += " Персонажи с чертами сохранены (кроме удалённых)."
+            msg += " (персонажи сохранены кроме удалённых)"
         await ctx.send(msg)
 
-        # Перераздаём сохранённым
-        if characters_to_keep:
-            for name, traits in characters_to_keep:
-                self.deal_to_character(name, traits)
+        for name, traits in to_keep:
+            self._deal_to_character(state, name, traits)
 
-        if self.current_round:
-            await self.show_initiative(ctx)
-        else:
-            remaining = len(self.deck)
-            await ctx.send(f"Инициатива пуста. Осталось в колоде: **{remaining}** карт")
+        await self._show_initiative(ctx, state) if state.current_round else \
+             ctx.send(f"Инициатива пуста. Осталось карт: {len(state.deck)}")
 
     @commands.command(name='card')
     async def draw_new_card(self, ctx, *, name: str):
-        name, _ = self.parse_name_and_traits(name)  # на случай если с флагами
-        if not name or name not in self.current_round:
-            await ctx.send("Персонаж не найден.")
+        state = self.get_state(ctx)
+        name, _ = InitiativeState.parse_name_and_traits(name)
+
+        if not name or name not in state.current_round:
+            await ctx.send("Персонаж не найден")
             return
 
-        traits = self.current_round[name]['traits']
-        new_card = self.draw_card()
+        traits = state.current_round[name]['traits']
+        new_card = state.draw_card()
 
-        self.current_round[name] = {
+        state.current_round[name] = {
             'card': new_card,
             'all_cards': [new_card],
             'traits': traits
         }
 
-        await ctx.send(f"{name} тянет новую карту: {self.format_card(new_card)}")
-        await self.show_initiative(ctx)
+        await ctx.send(f"{name} тянет новую карту: {state.format_card(new_card)}")
+        await self._show_initiative(ctx, state)
 
     @commands.command(name='drop')
     async def drop_character(self, ctx, *, names: str):
+        state = self.get_state(ctx)
         tokens = names.split()
         removed = []
+
         for token in tokens:
-            name, _ = self.parse_name_and_traits(token)
-            if name in self.current_round:
-                del self.current_round[name]
-                self.on_hold.discard(name)
+            name, _ = InitiativeState.parse_name_and_traits(token)
+            if name in state.current_round:
+                del state.current_round[name]
+                state.on_hold.discard(name)
                 removed.append(name)
+
         if removed:
             await ctx.send(f"Удалены: {', '.join(removed)}")
-        if self.current_round:
-            await self.show_initiative(ctx)
+
+        if state.current_round:
+            await self._show_initiative(ctx, state)
 
     @commands.command(name='hold')
     async def hold_action(self, ctx, *, names: str):
+        state = self.get_state(ctx)
         tokens = names.split()
         msg = []
+
         for token in tokens:
             if token.startswith('-'):
                 name = token[1:]
-                if name in self.on_hold:
-                    self.on_hold.discard(name)
+                if name in state.on_hold:
+                    state.on_hold.discard(name)
                     msg.append(f"Действует: {name}")
             else:
-                name, _ = self.parse_name_and_traits(token)
-                if name in self.current_round:
-                    self.on_hold.add(name)
+                name, _ = InitiativeState.parse_name_and_traits(token)
+                if name in state.current_round:
+                    state.on_hold.add(name)
                     msg.append(f"Ожидает: {name}")
+
         if msg:
             await ctx.send("\n".join(msg))
-        if self.current_round:
-            await self.show_initiative(ctx)
+
+        if state.current_round:
+            await self._show_initiative(ctx, state)
 
 
 async def setup(bot):
+    await bot.add_cog(Initiative(bot))
+
     await bot.add_cog(Initiative(bot))
